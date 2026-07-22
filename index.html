@@ -24,8 +24,15 @@
     padding:12px;}
   .map-wrap{position:relative;}
   canvas{display:block;width:100%;border-radius:8px;background:var(--panel2);}
-  #mapCanvas{height:420px;cursor:grab;touch-action:none;}
-  #mapCanvas:active{cursor:grabbing;}
+  .tabs{display:flex;gap:6px;margin-bottom:8px;}
+  .tabBtn{background:var(--panel2);border:1px solid var(--line);color:var(--dim);
+    border-radius:6px;padding:5px 12px;cursor:pointer;font-size:.75rem;font-weight:600;
+    letter-spacing:.03em;}
+  .tabBtn.active{background:var(--cruise);color:#04211c;border-color:var(--cruise);}
+  .stage-wrap{position:relative;height:420px;}
+  .stage{position:absolute;inset:0;width:100%;height:100%;cursor:grab;touch-action:none;}
+  .stage:active{cursor:grabbing;}
+  .stage.hidden{visibility:hidden;}
   #altCanvas{height:140px;margin-top:10px;cursor:pointer;}
   .legend{display:flex;flex-wrap:wrap;gap:12px;margin-top:10px;font-size:.72rem;color:var(--dim);}
   .legend span{display:inline-flex;align-items:center;gap:5px;}
@@ -56,21 +63,28 @@
 
 <div class="layout">
   <div class="card map-wrap">
-    <canvas id="mapCanvas"></canvas>
+    <div class="tabs">
+      <button id="tab2d" class="tabBtn active">2D MAP</button>
+      <button id="tab3d" class="tabBtn">3D ORBIT</button>
+    </div>
+    <div class="stage-wrap">
+      <canvas id="mapCanvas" class="stage"></canvas>
+      <canvas id="map3dCanvas" class="stage hidden"></canvas>
+    </div>
     <div class="legend">
       <span><i class="dot" style="background:var(--asc)"></i>Ascent</span>
       <span><i class="dot" style="background:var(--cruise)"></i>Cruise</span>
       <span><i class="dot" style="background:var(--desc)"></i>Descent</span>
       <span><i class="dot" style="background:var(--tower)"></i>Tower</span>
-      <span><i class="dot" style="background:var(--ring);opacity:.6"></i>Distance ring</span>
-      <span style="margin-left:auto">drag to pan · scroll to zoom</span>
+      <span><i class="dot" style="background:var(--ring);opacity:.6"></i>Distance ring / sensor tick</span>
+      <span style="margin-left:auto" id="dragHint">drag to pan · scroll to zoom</span>
     </div>
     <canvas id="altCanvas"></canvas>
     <div class="controls">
       <button id="playBtn">▶ Play</button>
-      <button data-speed="1" class="speedBtn">1x</button>
+      <button data-speed="1" class="speedBtn active">1x</button>
       <button data-speed="4" class="speedBtn">4x</button>
-      <button data-speed="12" class="speedBtn active">12x</button>
+      <button data-speed="12" class="speedBtn">12x</button>
       <button data-speed="30" class="speedBtn">30x</button>
       <input type="range" id="scrub" min="0" max="1" value="0" step="1">
     </div>
@@ -92,6 +106,8 @@
   tower (39.94796°N, −105.19576°W); phase coloring (ascent / cruise / descent) is a simple vertical-rate
   heuristic (dz/dt = −VD, ±0.5 m/s), separate from the project's actual QC/pass classification used in
   <code>load_b1.m</code>. Data downsampled 10 Hz native → 1 point / 2 s for smooth playback.
+  The 3D Orbit view exaggerates altitude ×5 (labeled) so climb/descent reads clearly against the
+  ~900 m horizontal extent of the flight.
 </footer>
 
 <script>
@@ -147,7 +163,10 @@ const FLIGHT_POINTS = [[0.0,39.9,-174.4,0.93,0,178.9,39.946394,-105.195292],[2.0
   // ---------- map canvas setup (pan/zoom) ----------
   const mapCanvas = document.getElementById('mapCanvas');
   const mctx = mapCanvas.getContext('2d');
+  const map3dCanvas = document.getElementById('map3dCanvas');
+  const m3ctx = map3dCanvas.getContext('2d');
   let view = {scale:1, ox:0, oy:0}; // pan offset in screen px, scale multiplier on top of fit
+  let activeTab = '2d';
 
   function fitScale(){
     const w = mapCanvas.width, h = mapCanvas.height;
@@ -157,16 +176,127 @@ const FLIGHT_POINTS = [[0.0,39.9,-174.4,0.93,0,178.9,39.946394,-105.195292],[2.0
   }
   let baseScale = 1;
 
+  // ---------- 3D orbit view ----------
+  const ALT_EXAG = 5;
+  let view3d = {yaw:-0.5, pitch:0.45, scale:1};
+  let base3DScale = 1;
+  const TOWER_TICKS = [3,7,12,32];
+
+  function fit3DScale(){
+    const w = map3dCanvas.width, h = map3dCanvas.height;
+    const spanX=(maxX-minX)||1, spanY=(maxY-minY)||1, spanZ=(maxAlt*ALT_EXAG)||1;
+    const R = Math.max(spanX,spanY,spanZ)*0.62;
+    return Math.min(w,h)*0.42/R;
+  }
+
+  function project3D(x,y,z){
+    const cx=(minX+maxX)/2, cy=(minY+maxY)/2;
+    const px=x-cx, py=y-cy, pz=z;
+    const cyaw=Math.cos(view3d.yaw), syaw=Math.sin(view3d.yaw);
+    const rx = px*cyaw - py*syaw;
+    const ry = px*syaw + py*cyaw;
+    const cpitch=Math.cos(view3d.pitch), spitch=Math.sin(view3d.pitch);
+    const sz = ry*spitch + pz*cpitch; // screen-vertical after tilt
+    const s = base3DScale*view3d.scale;
+    const w=map3dCanvas.width, h=map3dCanvas.height;
+    return [w/2 + rx*s, h/2 - sz*s];
+  }
+
+  function drawMap3DStatic(){
+    const w=map3dCanvas.width,h=map3dCanvas.height;
+    m3ctx.setTransform(1,0,0,1,0,0);
+    m3ctx.clearRect(0,0,w,h);
+    m3ctx.fillStyle='rgba(255,255,255,0.02)';
+    m3ctx.fillRect(0,0,w,h);
+
+    // ground rings (z=0 plane), every 200 m
+    m3ctx.strokeStyle='rgba(79,181,79,0.35)';
+    m3ctx.lineWidth=1;
+    const ringStep=200;
+    for (let r=ringStep;r<=maxDist+ringStep;r+=ringStep){
+      m3ctx.beginPath();
+      for (let a=0;a<=64;a++){
+        const ang=(a/64)*Math.PI*2;
+        const [sx,sy]=project3D(r*Math.cos(ang), r*Math.sin(ang), 0);
+        if (a===0) m3ctx.moveTo(sx,sy); else m3ctx.lineTo(sx,sy);
+      }
+      m3ctx.stroke();
+    }
+
+    // ghost full flight path
+    m3ctx.lineWidth=1.4;
+    m3ctx.strokeStyle='rgba(255,255,255,0.16)';
+    m3ctx.beginPath();
+    pts.forEach((p,i)=>{
+      const [sx,sy]=project3D(p[COLS.x],p[COLS.y],p[COLS.alt]*ALT_EXAG);
+      if (i===0) m3ctx.moveTo(sx,sy); else m3ctx.lineTo(sx,sy);
+    });
+    m3ctx.stroke();
+
+    // tower mast with real sensor-height ticks (3/7/12/32 m)
+    const [bx,by]=project3D(0,0,0);
+    const [tx,ty]=project3D(0,0,32*ALT_EXAG*1.05);
+    m3ctx.strokeStyle='#2f5fa8'; m3ctx.lineWidth=2;
+    m3ctx.beginPath(); m3ctx.moveTo(bx,by); m3ctx.lineTo(tx,ty); m3ctx.stroke();
+    m3ctx.fillStyle='#9db8d8';
+    m3ctx.font = `${10*(window.devicePixelRatio||1)}px sans-serif`;
+    TOWER_TICKS.forEach(hgt=>{
+      const [px1,py1]=project3D(-6,0,hgt*ALT_EXAG);
+      const [px2,py2]=project3D(6,0,hgt*ALT_EXAG);
+      m3ctx.strokeStyle='#2f5fa8';
+      m3ctx.beginPath(); m3ctx.moveTo(px1,py1); m3ctx.lineTo(px2,py2); m3ctx.stroke();
+      m3ctx.fillText(hgt+'m', px2+3, py2+3);
+    });
+    m3ctx.fillStyle='#2f5fa8';
+    m3ctx.beginPath(); m3ctx.arc(bx,by,4,0,Math.PI*2); m3ctx.fill();
+  }
+
+  function drawFrame3D(index){
+    drawMap3DStatic();
+    const start = Math.max(0, index-150);
+    m3ctx.lineWidth=2.4;
+    for (let i=start+1;i<=index;i++){
+      const p0=pts[i-1], p1=pts[i];
+      const [x0,y0]=project3D(p0[COLS.x],p0[COLS.y],p0[COLS.alt]*ALT_EXAG);
+      const [x1,y1]=project3D(p1[COLS.x],p1[COLS.y],p1[COLS.alt]*ALT_EXAG);
+      const alpha=0.25+0.75*((i-start)/(index-start||1));
+      m3ctx.strokeStyle=PHASE_COLOR[p1[COLS.phase]];
+      m3ctx.globalAlpha=alpha;
+      m3ctx.beginPath(); m3ctx.moveTo(x0,y0); m3ctx.lineTo(x1,y1); m3ctx.stroke();
+    }
+    m3ctx.globalAlpha=1;
+    const p=pts[index];
+    const [sx,sy]=project3D(p[COLS.x],p[COLS.y],p[COLS.alt]*ALT_EXAG);
+    m3ctx.fillStyle=PHASE_COLOR[p[COLS.phase]];
+    m3ctx.beginPath(); m3ctx.arc(sx,sy,5,0,Math.PI*2); m3ctx.fill();
+    m3ctx.strokeStyle='#fff'; m3ctx.lineWidth=1.5; m3ctx.stroke();
+  }
+
+  // ---------- tabs ----------
+  const tab2dBtn=document.getElementById('tab2d'), tab3dBtn=document.getElementById('tab3d');
+  const dragHint=document.getElementById('dragHint');
+  tab2dBtn.addEventListener('click', ()=>switchTab('2d'));
+  tab3dBtn.addEventListener('click', ()=>switchTab('3d'));
+  function switchTab(tab){
+    activeTab=tab;
+    tab2dBtn.classList.toggle('active', tab==='2d');
+    tab3dBtn.classList.toggle('active', tab==='3d');
+    mapCanvas.classList.toggle('hidden', tab!=='2d');
+    map3dCanvas.classList.toggle('hidden', tab!=='3d');
+    dragHint.textContent = tab==='2d' ? 'drag to pan · scroll to zoom' : 'drag to orbit · scroll to zoom';
+    render(Math.floor(currentIndex));
+  }
+
   function resizeCanvases(){
-    for (const c of [mapCanvas, altCanvas]){
+    for (const c of [mapCanvas, map3dCanvas, altCanvas]){
       const rect = c.getBoundingClientRect();
       const dpr = window.devicePixelRatio||1;
       c.width = Math.round(rect.width*dpr);
       c.height = Math.round(rect.height*dpr);
     }
     baseScale = fitScale();
-    drawMapStatic();
-    drawFrame(currentIndex);
+    base3DScale = fit3DScale();
+    render(Math.floor(currentIndex));
   }
 
   function worldToScreen(x,y){
@@ -224,10 +354,8 @@ const FLIGHT_POINTS = [[0.0,39.9,-174.4,0.93,0,178.9,39.946394,-105.195292],[2.0
   }
 
   // comet trail + current position, drawn on top each frame
-  let trailCache = null;
-  function drawFrame(index){
+  function drawFrame2D(index){
     drawMapStatic();
-    const w=mapCanvas.width;
     const start = Math.max(0, index-150); // trail length
     mctx.lineWidth = 2.4;
     for (let i=start+1;i<=index;i++){
@@ -246,8 +374,10 @@ const FLIGHT_POINTS = [[0.0,39.9,-174.4,0.93,0,178.9,39.946394,-105.195292],[2.0
     mctx.fillStyle = PHASE_COLOR[p[COLS.phase]];
     mctx.beginPath(); mctx.arc(sx,sy,5,0,Math.PI*2); mctx.fill();
     mctx.strokeStyle='#fff'; mctx.lineWidth=1.5; mctx.stroke();
+  }
 
-    // telemetry
+  function updateTelemetry(index){
+    const p = pts[index];
     document.getElementById('tElapsed').textContent = fmtTime(p[COLS.t]);
     const ph = document.getElementById('tPhase');
     ph.textContent = PHASE_LABEL[p[COLS.phase]];
@@ -256,9 +386,13 @@ const FLIGHT_POINTS = [[0.0,39.9,-174.4,0.93,0,178.9,39.946394,-105.195292],[2.0
     document.getElementById('tDist').textContent = p[COLS.dist].toFixed(0);
     document.getElementById('tLat').textContent = p[COLS.lat].toFixed(5) + '°';
     document.getElementById('tLon').textContent = p[COLS.lon].toFixed(5) + '°';
-
-    drawAlt(index);
     scrub.value = index;
+  }
+
+  function render(index){
+    updateTelemetry(index);
+    if (activeTab === '2d') drawFrame2D(index); else drawFrame3D(index);
+    drawAlt(index);
   }
 
   function fmtTime(sec){
@@ -276,7 +410,7 @@ const FLIGHT_POINTS = [[0.0,39.9,-174.4,0.93,0,178.9,39.946394,-105.195292],[2.0
     const dpr = window.devicePixelRatio||1;
     view.ox += (e.clientX-lastPx)*dpr; view.oy += (e.clientY-lastPy)*dpr;
     lastPx=e.clientX; lastPy=e.clientY;
-    drawFrame(currentIndex);
+    render(Math.floor(currentIndex));
   });
   mapCanvas.addEventListener('pointerup', ()=>dragging=false);
   mapCanvas.addEventListener('pointerleave', ()=>dragging=false);
@@ -284,7 +418,29 @@ const FLIGHT_POINTS = [[0.0,39.9,-174.4,0.93,0,178.9,39.946394,-105.195292],[2.0
     e.preventDefault();
     const factor = e.deltaY<0 ? 1.1 : 0.9;
     view.scale = Math.max(0.3, Math.min(8, view.scale*factor));
-    drawFrame(currentIndex);
+    render(Math.floor(currentIndex));
+  }, {passive:false});
+
+  // ---------- 3D orbit pointer controls ----------
+  let dragging3d=false, lastPx3=0, lastPy3=0;
+  map3dCanvas.addEventListener('pointerdown', e=>{
+    dragging3d=true; lastPx3=e.clientX; lastPy3=e.clientY; map3dCanvas.setPointerCapture(e.pointerId);
+  });
+  map3dCanvas.addEventListener('pointermove', e=>{
+    if(!dragging3d) return;
+    const dx=e.clientX-lastPx3, dy=e.clientY-lastPy3;
+    view3d.yaw += dx*0.01;
+    view3d.pitch = Math.max(-1.4, Math.min(1.4, view3d.pitch + dy*0.01));
+    lastPx3=e.clientX; lastPy3=e.clientY;
+    render(Math.floor(currentIndex));
+  });
+  map3dCanvas.addEventListener('pointerup', ()=>dragging3d=false);
+  map3dCanvas.addEventListener('pointerleave', ()=>dragging3d=false);
+  map3dCanvas.addEventListener('wheel', e=>{
+    e.preventDefault();
+    const factor = e.deltaY<0 ? 1.1 : 0.9;
+    view3d.scale = Math.max(0.3, Math.min(6, view3d.scale*factor));
+    render(Math.floor(currentIndex));
   }, {passive:false});
 
   // ---------- altitude strip chart ----------
@@ -336,17 +492,17 @@ const FLIGHT_POINTS = [[0.0,39.9,-174.4,0.93,0,178.9,39.946394,-105.195292],[2.0
     for (let i=0;i<pts.length;i++){ if(pts[i][COLS.t]>=t){ idx=i; break; } idx=i; }
     currentIndex = idx;
     playing=false; document.getElementById('playBtn').textContent='▶ Play';
-    drawFrame(currentIndex);
+    render(currentIndex);
   }
 
   // ---------- playback ----------
   const scrub = document.getElementById('scrub');
   scrub.max = pts.length-1;
-  let currentIndex = 0, playing=false, speed=12, lastTs=0;
+  let currentIndex = 0, playing=false, speed=1, lastTs=0;
   scrub.addEventListener('input', ()=>{
     currentIndex = Number(scrub.value); playing=false;
     document.getElementById('playBtn').textContent='▶ Play';
-    drawFrame(currentIndex);
+    render(currentIndex);
   });
 
   document.getElementById('playBtn').addEventListener('click', function(){
@@ -369,13 +525,19 @@ const FLIGHT_POINTS = [[0.0,39.9,-174.4,0.93,0,178.9,39.946394,-105.195292],[2.0
     // advance ~ (2 real seconds per point) / speed factor -> points per second
     const pointsPerSec = speed / 2 * 5; // tuned for a lively but readable playback
     currentIndex = Math.min(pts.length-1, currentIndex + dt*pointsPerSec);
-    drawFrame(Math.floor(currentIndex));
+    render(Math.floor(currentIndex));
     if (currentIndex >= pts.length-1){ playing=false; document.getElementById('playBtn').textContent='▶ Play'; return; }
     requestAnimationFrame(tick);
   }
 
   window.addEventListener('resize', resizeCanvases);
   resizeCanvases();
+
+  // autoplay on load, so a QR-code visitor sees the flight moving immediately
+  playing = true;
+  document.getElementById('playBtn').textContent = '⏸ Pause';
+  lastTs = performance.now();
+  requestAnimationFrame(tick);
 })();
 </script>
 </body>
