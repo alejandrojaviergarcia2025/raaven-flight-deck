@@ -29,6 +29,9 @@
     border-radius:6px;padding:5px 12px;cursor:pointer;font-size:.75rem;font-weight:600;
     letter-spacing:.03em;}
   .tabBtn.active{background:var(--cruise);color:#04211c;border-color:var(--cruise);}
+  .layers{display:flex;gap:14px;margin-left:16px;font-size:.75rem;color:var(--dim);align-items:center;}
+  .layers label{display:flex;align-items:center;gap:5px;cursor:pointer;}
+  .layers input{accent-color:var(--cruise);}
   .stage-wrap{position:relative;height:420px;}
   .stage{position:absolute;inset:0;width:100%;height:100%;cursor:grab;touch-action:none;}
   .stage:active{cursor:grabbing;}
@@ -66,6 +69,11 @@
     <div class="tabs">
       <button id="tab2d" class="tabBtn active">2D MAP</button>
       <button id="tab3d" class="tabBtn">3D ORBIT</button>
+      <div class="layers">
+        <label><input type="checkbox" id="toggleRings" checked> Distance rings</label>
+        <label><input type="checkbox" id="toggleGhost" checked> Full flight path</label>
+        <label><input type="checkbox" id="toggleTower" checked> Tower</label>
+      </div>
     </div>
     <div class="stage-wrap">
       <canvas id="mapCanvas" class="stage"></canvas>
@@ -167,6 +175,10 @@ const FLIGHT_POINTS = [[0.0,39.9,-174.4,0.93,0,178.9,39.946394,-105.195292],[2.0
   const m3ctx = map3dCanvas.getContext('2d');
   let view = {scale:1, ox:0, oy:0}; // pan offset in screen px, scale multiplier on top of fit
   let activeTab = '2d';
+  let showRings=true, showGhost=true, showTower=true;
+  document.getElementById('toggleRings').addEventListener('change', e=>{ showRings=e.target.checked; render(Math.floor(currentIndex)); });
+  document.getElementById('toggleGhost').addEventListener('change', e=>{ showGhost=e.target.checked; render(Math.floor(currentIndex)); });
+  document.getElementById('toggleTower').addEventListener('change', e=>{ showTower=e.target.checked; render(Math.floor(currentIndex)); });
 
   function fitScale(){
     const w = mapCanvas.width, h = mapCanvas.height;
@@ -210,45 +222,51 @@ const FLIGHT_POINTS = [[0.0,39.9,-174.4,0.93,0,178.9,39.946394,-105.195292],[2.0
     m3ctx.fillRect(0,0,w,h);
 
     // ground rings (z=0 plane), every 200 m
-    m3ctx.strokeStyle='rgba(79,181,79,0.35)';
-    m3ctx.lineWidth=1;
-    const ringStep=200;
-    for (let r=ringStep;r<=maxDist+ringStep;r+=ringStep){
-      m3ctx.beginPath();
-      for (let a=0;a<=64;a++){
-        const ang=(a/64)*Math.PI*2;
-        const [sx,sy]=project3D(r*Math.cos(ang), r*Math.sin(ang), 0);
-        if (a===0) m3ctx.moveTo(sx,sy); else m3ctx.lineTo(sx,sy);
+    if (showRings){
+      m3ctx.strokeStyle='rgba(79,181,79,0.35)';
+      m3ctx.lineWidth=1;
+      const ringStep=200;
+      for (let r=ringStep;r<=maxDist+ringStep;r+=ringStep){
+        m3ctx.beginPath();
+        for (let a=0;a<=64;a++){
+          const ang=(a/64)*Math.PI*2;
+          const [sx,sy]=project3D(r*Math.cos(ang), r*Math.sin(ang), 0);
+          if (a===0) m3ctx.moveTo(sx,sy); else m3ctx.lineTo(sx,sy);
+        }
+        m3ctx.stroke();
       }
-      m3ctx.stroke();
     }
 
     // ghost full flight path
-    m3ctx.lineWidth=1.4;
-    m3ctx.strokeStyle='rgba(255,255,255,0.16)';
-    m3ctx.beginPath();
-    pts.forEach((p,i)=>{
-      const [sx,sy]=project3D(p[COLS.x],p[COLS.y],p[COLS.alt]*ALT_EXAG);
-      if (i===0) m3ctx.moveTo(sx,sy); else m3ctx.lineTo(sx,sy);
-    });
-    m3ctx.stroke();
+    if (showGhost){
+      m3ctx.lineWidth=1.4;
+      m3ctx.strokeStyle='rgba(255,255,255,0.16)';
+      m3ctx.beginPath();
+      pts.forEach((p,i)=>{
+        const [sx,sy]=project3D(p[COLS.x],p[COLS.y],p[COLS.alt]*ALT_EXAG);
+        if (i===0) m3ctx.moveTo(sx,sy); else m3ctx.lineTo(sx,sy);
+      });
+      m3ctx.stroke();
+    }
 
     // tower mast with real sensor-height ticks (3/7/12/32 m)
-    const [bx,by]=project3D(0,0,0);
-    const [tx,ty]=project3D(0,0,32*ALT_EXAG*1.05);
-    m3ctx.strokeStyle='#2f5fa8'; m3ctx.lineWidth=2;
-    m3ctx.beginPath(); m3ctx.moveTo(bx,by); m3ctx.lineTo(tx,ty); m3ctx.stroke();
-    m3ctx.fillStyle='#9db8d8';
-    m3ctx.font = `${10*(window.devicePixelRatio||1)}px sans-serif`;
-    TOWER_TICKS.forEach(hgt=>{
-      const [px1,py1]=project3D(-6,0,hgt*ALT_EXAG);
-      const [px2,py2]=project3D(6,0,hgt*ALT_EXAG);
-      m3ctx.strokeStyle='#2f5fa8';
-      m3ctx.beginPath(); m3ctx.moveTo(px1,py1); m3ctx.lineTo(px2,py2); m3ctx.stroke();
-      m3ctx.fillText(hgt+'m', px2+3, py2+3);
-    });
-    m3ctx.fillStyle='#2f5fa8';
-    m3ctx.beginPath(); m3ctx.arc(bx,by,4,0,Math.PI*2); m3ctx.fill();
+    if (showTower){
+      const [bx,by]=project3D(0,0,0);
+      const [tx,ty]=project3D(0,0,32*ALT_EXAG*1.05);
+      m3ctx.strokeStyle='#2f5fa8'; m3ctx.lineWidth=2;
+      m3ctx.beginPath(); m3ctx.moveTo(bx,by); m3ctx.lineTo(tx,ty); m3ctx.stroke();
+      m3ctx.fillStyle='#9db8d8';
+      m3ctx.font = `${10*(window.devicePixelRatio||1)}px sans-serif`;
+      TOWER_TICKS.forEach(hgt=>{
+        const [px1,py1]=project3D(-6,0,hgt*ALT_EXAG);
+        const [px2,py2]=project3D(6,0,hgt*ALT_EXAG);
+        m3ctx.strokeStyle='#2f5fa8';
+        m3ctx.beginPath(); m3ctx.moveTo(px1,py1); m3ctx.lineTo(px2,py2); m3ctx.stroke();
+        m3ctx.fillText(hgt+'m', px2+3, py2+3);
+      });
+      m3ctx.fillStyle='#2f5fa8';
+      m3ctx.beginPath(); m3ctx.arc(bx,by,4,0,Math.PI*2); m3ctx.fill();
+    }
   }
 
   function drawFrame3D(index){
@@ -318,39 +336,45 @@ const FLIGHT_POINTS = [[0.0,39.9,-174.4,0.93,0,178.9,39.946394,-105.195292],[2.0
     mctx.fillRect(0,0,w,h);
 
     // distance rings every 200m
-    mctx.lineWidth = 1;
-    mctx.strokeStyle = 'rgba(79,181,79,0.35)';
-    mctx.fillStyle = 'rgba(79,181,79,0.7)';
-    mctx.font = `${11*(window.devicePixelRatio||1)}px sans-serif`;
-    const ringStep = 200;
-    for (let r=ringStep; r<=maxDist+ringStep; r+=ringStep){
-      const [cx,cy] = worldToScreen(0,0);
-      const rr = r*baseScale*view.scale;
-      mctx.beginPath();
-      mctx.arc(cx,cy,rr,0,Math.PI*2);
-      mctx.stroke();
-      const lx = Math.min(cx+rr+4, w-40);
-      mctx.fillText(r+'m', lx, cy-4);
+    if (showRings){
+      mctx.lineWidth = 1;
+      mctx.strokeStyle = 'rgba(79,181,79,0.35)';
+      mctx.fillStyle = 'rgba(79,181,79,0.7)';
+      mctx.font = `${11*(window.devicePixelRatio||1)}px sans-serif`;
+      const ringStep = 200;
+      for (let r=ringStep; r<=maxDist+ringStep; r+=ringStep){
+        const [cx,cy] = worldToScreen(0,0);
+        const rr = r*baseScale*view.scale;
+        mctx.beginPath();
+        mctx.arc(cx,cy,rr,0,Math.PI*2);
+        mctx.stroke();
+        const lx = Math.min(cx+rr+4, w-40);
+        mctx.fillText(r+'m', lx, cy-4);
+      }
     }
 
     // ghost full path
-    mctx.lineWidth = 1.4;
-    mctx.strokeStyle = 'rgba(255,255,255,0.16)';
-    mctx.beginPath();
-    pts.forEach((p,i)=>{
-      const [sx,sy]=worldToScreen(p[COLS.x],p[COLS.y]);
-      if (i===0) mctx.moveTo(sx,sy); else mctx.lineTo(sx,sy);
-    });
-    mctx.stroke();
+    if (showGhost){
+      mctx.lineWidth = 1.4;
+      mctx.strokeStyle = 'rgba(255,255,255,0.16)';
+      mctx.beginPath();
+      pts.forEach((p,i)=>{
+        const [sx,sy]=worldToScreen(p[COLS.x],p[COLS.y]);
+        if (i===0) mctx.moveTo(sx,sy); else mctx.lineTo(sx,sy);
+      });
+      mctx.stroke();
+    }
 
     // tower marker (diamond) at origin
-    const [tx,ty] = worldToScreen(0,0);
-    const sz = 7;
-    mctx.fillStyle = '#2f5fa8';
-    mctx.beginPath();
-    mctx.moveTo(tx,ty-sz); mctx.lineTo(tx+sz,ty); mctx.lineTo(tx,ty+sz); mctx.lineTo(tx-sz,ty);
-    mctx.closePath(); mctx.fill();
-    mctx.strokeStyle='#9db8d8'; mctx.lineWidth=1; mctx.stroke();
+    if (showTower){
+      const [tx,ty] = worldToScreen(0,0);
+      const sz = 7;
+      mctx.fillStyle = '#2f5fa8';
+      mctx.beginPath();
+      mctx.moveTo(tx,ty-sz); mctx.lineTo(tx+sz,ty); mctx.lineTo(tx,ty+sz); mctx.lineTo(tx-sz,ty);
+      mctx.closePath(); mctx.fill();
+      mctx.strokeStyle='#9db8d8'; mctx.lineWidth=1; mctx.stroke();
+    }
   }
 
   // comet trail + current position, drawn on top each frame
