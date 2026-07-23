@@ -70,6 +70,10 @@
   .wind-toggles-body{display:flex;flex-direction:column;gap:.85rem;margin-top:.5rem;
     background:rgba(10,18,28,.75);border:1px solid var(--border);border-radius:7px;padding:1.05rem 1.4rem}
   .wind-toggles-body.collapsed{display:none}
+  .wind-toggles-row{display:flex;gap:.4rem}
+  .help-body{font-family:var(--font-body);font-size:.82rem;line-height:1.55;color:var(--ink);max-width:280px}
+  .help-body p{margin:0 0 .65rem}
+  .help-body p:last-child{margin-bottom:0}
   .wind-toggles label{display:flex;align-items:center;gap:.7rem;font-family:var(--font-label);
     font-size:1.18rem;letter-spacing:.04em;color:var(--ink);cursor:pointer;user-select:none}
   .wind-toggles input{accent-color:var(--amber);cursor:pointer;width:1.45rem;height:1.45rem}
@@ -147,7 +151,17 @@
       <button class="view-tab active" data-view="3d" role="tab" aria-selected="true">3D VIEW</button>
     </div>
     <div class="wind-toggles" id="windToggles">
-      <button class="wind-toggles-btn" id="toggleOverlaysBtn" type="button">OVERLAYS &#9662;</button>
+      <div class="wind-toggles-row">
+        <button class="wind-toggles-btn" id="toggleHelpBtn" type="button">? HELP</button>
+        <button class="wind-toggles-btn" id="toggleOverlaysBtn" type="button">OVERLAYS &#9662;</button>
+      </div>
+      <div class="wind-toggles-body help-body collapsed" id="helpBody">
+        <p><b style="color:var(--amber)">&#9679;</b> Ascent &nbsp; <b style="color:var(--teal)">&#9679;</b> Cruise &nbsp; <b style="color:var(--descent)">&#9679;</b> Descent</p>
+        <p><b>Wind Vectors:</b> arrow points where the wind is going. Color = speed (scale bottom-left when active).</p>
+        <p><b>Wind Barbs:</b> shaft points where the wind is coming FROM. Pennant (triangle) = 50kt, full barb = 10kt, half barb = 5kt, lone circle = calm.</p>
+        <p>The same wind symbols appear twice: one traveling with RAAVEN, one fixed at the tower (32m) &mdash; so you can compare them directly.</p>
+        <p><b>Green rings:</b> distance from tower, in meters. <b>Red diamond:</b> the tower.</p>
+      </div>
       <div class="wind-toggles-body" id="windTogglesBody">
         <label><input type="checkbox" id="chkWindVec"> Wind Vectors</label>
         <label id="barbToggleWrap"><input type="checkbox" id="chkWindBarb"> Wind Barbs</label>
@@ -555,6 +569,17 @@ const FT_MORE = {
     mctx.fillStyle="rgba(232,238,245,.85)"; mctx.font="10px Bahnschrift,sans-serif";
     mctx.fillText("TOWER", twx+9, twy+4);
 
+    // tower's own wind, fixed at the tower position, same symbol as RAAVEN's so the
+    // two are directly comparable at a glance
+    if (showWindVec || showWindBarb){
+      const tw = towerWindUV(idx0);
+      if (tw){
+        const color = windColor(tw.spd);
+        if (showWindVec) drawArrowSymbol(mctx, twx, twy, tw.u, tw.v, color, WIND_ARROW_PX*1.3, 4.0);
+        if (showWindBarb) drawBarbSymbol(mctx, twx, twy, tw.u, tw.v, color, 1.3);
+      }
+    }
+
     // wind overlay (checkbox-driven, progressive reveal like the comet trail)
     if (hasWind && (showWindVec || showWindBarb)){
       for (let i=0; i<=idx0 && i<N; i+=WIND_STEP){
@@ -613,6 +638,18 @@ const FT_MORE = {
     if (!WGOOD[idx0]) return { u: WU[i1], v: WV[i1] };
     if (!WGOOD[i1]) return { u: WU[idx0], v: WV[idx0] };
     return { u: WU[idx0]+(WU[i1]-WU[idx0])*frac, v: WV[idx0]+(WV[i1]-WV[idx0])*frac };
+  }
+
+  // tower's own wind (speed+direction, 32m) converted to u,v so it can reuse the
+  // same drawArrowSymbol/drawBarbSymbol functions already built for RAAVEN's wind.
+  // (checked lazily inside the function, not as a top-level const, since `hasMore`
+  // is declared further down in this same script and isn't initialized yet here)
+  function towerWindUV(idx0){
+    if (!hasMore || !FT_MORE.wspd_tower || !FT_MORE.wdir_tower) return null;
+    const spd = FT_MORE.wspd_tower[idx0], dir = FT_MORE.wdir_tower[idx0];
+    if (spd==null || dir==null || isNaN(spd) || isNaN(dir)) return null;
+    const rad = dir*Math.PI/180;
+    return { u: -spd*Math.sin(rad), v: -spd*Math.cos(rad), spd };
   }
 
   function drawArrowSymbol(ctx, sx, sy, u, v, color, lenPx, lw){
@@ -942,6 +979,37 @@ const FT_MORE = {
     m3ctx.fillStyle="rgba(232,238,245,.85)"; m3ctx.font="10px Bahnschrift,sans-serif";
     m3ctx.fillText("TOWER", tbx+8, tby+2);
 
+    // tower's own wind, fixed at the 32m tick (the real sensor height being compared),
+    // same barb/vector convention as RAAVEN's so the two read side by side
+    if (showWindVec || showWindBarb){
+      const tw = towerWindUV(idx0);
+      if (tw){
+        const color = windColor(tw.spd);
+        const [twwx,twwy] = project3D(0,0,32);
+        if (showWindVec){
+          const spd = tw.spd, ux = tw.u/Math.max(0.01,spd), uy = tw.v/Math.max(0.01,spd);
+          const [wex,wey] = project3D(ux*30, uy*30, 32);
+          m3ctx.strokeStyle=color; m3ctx.fillStyle=color; m3ctx.lineWidth=3.4;
+          m3ctx.beginPath(); m3ctx.moveTo(twwx,twwy); m3ctx.lineTo(wex,wey); m3ctx.stroke();
+          const wang = Math.atan2(wey-twwy, wex-twwx);
+          m3ctx.beginPath();
+          m3ctx.moveTo(wex,wey);
+          m3ctx.lineTo(wex-14*Math.cos(wang-0.4), wey-14*Math.sin(wang-0.4));
+          m3ctx.lineTo(wex-14*Math.cos(wang+0.4), wey-14*Math.sin(wang+0.4));
+          m3ctx.closePath(); m3ctx.fill();
+        }
+        if (showWindBarb){
+          if (tw.spd < 1.03){ drawBarbAtAngle(m3ctx, twwx, twwy, 0, tw.spd, color, 1.3); }
+          else{
+            const ux = tw.u/tw.spd, uy = tw.v/tw.spd;
+            const [fex,fey] = project3D(-ux*18, -uy*18, 32);
+            const bang = Math.atan2(fey-twwy, fex-twwx);
+            drawBarbAtAngle(m3ctx, twwx, twwy, bang, tw.spd, color, 1.3);
+          }
+        }
+      }
+    }
+
     // full ghost path
     m3ctx.beginPath();
     for(let i=0;i<N;i++){ const [sx,sy]=project3D(X[i],Y[i],FT.alt[i]); i===0?m3ctx.moveTo(sx,sy):m3ctx.lineTo(sx,sy); }
@@ -1125,6 +1193,15 @@ const FT_MORE = {
   toggleOverlaysBtn.addEventListener("click", ()=>{
     overlaysCollapsed = !overlaysCollapsed;
     applyOverlaysCollapsed();
+  });
+
+  // "? HELP" panel: plain-language legend for the overlay symbols, starts collapsed always
+  // (it's supplementary, unlike OVERLAYS which is the primary control)
+  const toggleHelpBtn = el("toggleHelpBtn"), helpBody = el("helpBody");
+  let helpCollapsed = true;
+  toggleHelpBtn.addEventListener("click", ()=>{
+    helpCollapsed = !helpCollapsed;
+    helpBody.classList.toggle("collapsed", helpCollapsed);
   });
 
   // wind overlay checkboxes: independent toggles drawn on top of whichever base view is active
