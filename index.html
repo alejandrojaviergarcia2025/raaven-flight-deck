@@ -4,6 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/cesium@1.111/Build/Cesium/Widgets/widgets.css" />
 </head>
 <body>
 <title>RAAVEN Flight Deck &mdash; 2026-03-25</title>
@@ -61,6 +62,7 @@
   #mapCanvas, #map3dCanvas{cursor:grab}
   #mapCanvas:active, #map3dCanvas:active{cursor:grabbing}
   #realMapDiv{position:absolute;inset:0;display:none;z-index:0}
+  #satCesiumDiv{position:absolute;inset:0;z-index:0;cursor:grab}
   .wind-toggles-btn.active{color:var(--bg);background:var(--amber);border-color:var(--amber)}
 
   .wind-scale{display:flex;align-items:center;gap:.4rem}
@@ -72,6 +74,8 @@
     cursor:pointer;display:block}
   .wind-toggles-body{display:flex;flex-direction:column;gap:.85rem;margin-top:.5rem;
     background:rgba(10,18,28,.75);border:1px solid var(--border);border-radius:7px;padding:1.05rem 1.4rem}
+  .wind-toggles-body label{font-size:.86rem;display:flex;align-items:center;gap:.5rem}
+  .wind-toggles-body input[type=checkbox]{transform:scale(.85)}
   .wind-toggles-body.collapsed{display:none}
   .wind-toggles-row{display:flex;gap:.4rem}
   .help-body{font-family:var(--font-body);font-size:.82rem;line-height:1.55;color:var(--ink);max-width:280px}
@@ -179,6 +183,7 @@
     <div id="realMapDiv"></div>
     <canvas id="mapCanvas" class="view-hidden"></canvas>
     <canvas id="map3dCanvas"></canvas>
+    <div id="satCesiumDiv" class="view-hidden"></div>
     <div class="map-legend" id="legend2d" style="display:none">
       <span><i class="swatch" style="background:var(--amber)"></i>Ascent</span>
       <span><i class="swatch" style="background:var(--teal)"></i>Cruise</span>
@@ -198,6 +203,12 @@
         <span>Wind speed:</span><span id="windScaleLo3d">&mdash;</span><span class="wind-scale-bar" id="windScaleBar3d"></span><span id="windScaleHi3d">&mdash;</span>
         <span>&middot; barbs: feather=10kt, half=5kt, pennant=50kt &middot; big glow = live at drone</span>
       </span>
+    </div>
+    <div class="map-legend" id="legendSat3d" style="display:none">
+      <span>Drag to orbit &middot; scroll to zoom</span>
+      <span>Real Esri satellite imagery &middot; flat ground (no elevation data)</span>
+      <span><i class="swatch" style="background:#d1483a;border-radius:2px"></i>Tower + real wind (fixed, 32m)</span>
+      <span>Bright arrow on aircraft = RAAVEN&#39;s own wind</span>
     </div>
   </section>
   <aside class="telemetry">
@@ -372,6 +383,12 @@ const FT_MORE = {
 </script>
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 <script>
+  // Must be set BEFORE Cesium.js loads, or its internal Web Workers
+  // (terrain/imagery processing) fail silently and nothing renders.
+  window.CESIUM_BASE_URL = "https://cdn.jsdelivr.net/npm/cesium@1.111/Build/Cesium/";
+</script>
+<script src="https://cdn.jsdelivr.net/npm/cesium@1.111/Build/Cesium/Cesium.js"></script>
+<script>
 (function(){
   "use strict";
   const TOWER = { lat: 39.94796, lon: -105.19576 };
@@ -493,8 +510,11 @@ const FT_MORE = {
     // Esri World Imagery: free satellite tiles, no API key needed. Note the
     // {z}/{y}/{x} order here — ArcGIS REST tile services swap x/y vs. the
     // usual {z}/{x}/{y} XYZ scheme most other tile providers use.
+    // maxZoom capped below this rural site's real available imagery
+    // resolution — requesting past it just upscales the same tile, which
+    // reads as pixelated/unprofessional rather than genuinely more detailed.
     L.tileLayer("https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}", {
-      maxZoom: 19,
+      maxZoom: 17,
       attribution: "Tiles &copy; Esri &mdash; Source: Esri, Maxar, Earthstar Geographics, and the GIS User Community"
     }).addTo(leafletMap);
     const lat0 = TOWER.lat + minY/mPerLat, lat1 = TOWER.lat + maxY/mPerLat;
@@ -502,14 +522,32 @@ const FT_MORE = {
     leafletMap.fitBounds([[lat0,lon0],[lat1,lon1]], { padding:[40,40] });
   }
 
-  function updateRealMapState(){
-    const active = realMapMode && viewMode === "2d";
-    realMapDiv.style.display = active ? "block" : "none";
-    mapCanvas.style.pointerEvents = active ? "none" : "";
-    if (active){
+  // Single REAL MAP toggle shared by both the 2D and 3D tabs — its effect
+  // depends on which tab is currently active: in 2D it swaps in the Leaflet
+  // satellite basemap (drawn under the existing canvas overlay); in 3D it
+  // swaps in the Cesium satellite scene, fully replacing the hand-rolled
+  // orbit view (both already draw the complete scene, so layering them
+  // would just be redundant/conflicting).
+  function updateViewVisibility(){
+    const sat2d = realMapMode && viewMode === "2d";
+    const sat3d = realMapMode && viewMode === "3d";
+
+    realMapDiv.style.display = sat2d ? "block" : "none";
+    mapCanvas.style.pointerEvents = sat2d ? "none" : "";
+    if (sat2d){
       ensureLeafletMap();
       setTimeout(()=>{ if (leafletMap) leafletMap.invalidateSize(); }, 0);
     }
+
+    map3dCanvas.classList.toggle("view-hidden", !(viewMode==="3d" && !sat3d));
+    satCesiumDiv.classList.toggle("view-hidden", !sat3d);
+    if (sat3d) initSat3D();
+
+    el("legend2d").style.display = viewMode==="2d" ? "flex":"none";
+    el("legend3d").style.display = (viewMode==="3d" && !sat3d) ? "flex":"none";
+    el("legendSat3d").style.display = sat3d ? "flex":"none";
+
+    document.getElementById("toggleRealMapBtn").classList.toggle("active", realMapMode);
   }
 
   function toScreen(x,y){
@@ -1220,6 +1258,283 @@ const FT_MORE = {
     render();
   }, {passive:false});
 
+  // ==================== 3D SATELLITE VIEW (Cesium) ====================
+  // Third tab alongside MAP/3D VIEW. Lazily initialized on first activation
+  // so Cesium/satellite tiles are never fetched unless the user opens this
+  // tab. Reuses the same TOWER/N/X/Y/PHASE/WU/WV/WSPD/WDIR/WGOOD/windColor
+  // data already computed above for MAP/3D VIEW, so results/colors match.
+  const satCesiumDiv = document.getElementById("satCesiumDiv");
+  let cesiumViewer = null, sat3dReady = false;
+  // Oblique by default (not flat/top-down) — a top-down start read as "this
+  // just looks like the 2D map", losing the point of a 3D view. Fixed on
+  // the tower (does not follow the aircraft — panning the whole scene read
+  // as unwanted camera movement); range is wide enough that the aircraft
+  // stays in frame across the whole flight, which is what actually fixed
+  // the "scrub bar looks broken" issue, not the following-camera.
+  let sat3dHeading = 0, sat3dPitch = Cesium.Math.toRadians(-35), sat3dRange = 4000;
+  let sat3dPathPositions = null, sat3dAircraftEntity, sat3dTrailPool = [],
+      sat3dRaavenWindEntity, sat3dTowerWindEntity, sat3dOrbitTarget, sat3dTowerPos32,
+      sat3dLastIconKey = null;
+  const SAT3D_WIND_ARROW_SCALE = 6; // meters per m/s, just for visual arrow length
+  const SAT3D_TRAIL_LEN = 70; // matches the 2D/hand-rolled 3D comet-trail length
+
+  function windColorCesium(spd){ return Cesium.Color.fromCssColorString(windColor(spd)); }
+
+  // small triangle-arrow icon (points "up" in image space) used as the
+  // aircraft billboard, so heading is visible in 3D the same way the 2D
+  // view rotates its aircraft triangle — plain dots gave no sense of
+  // direction of travel.
+  function makeArrowIcon(hexColor){
+    const c = document.createElement("canvas");
+    c.width = 28; c.height = 28;
+    const ctx = c.getContext("2d");
+    ctx.translate(14,14);
+    ctx.fillStyle = hexColor;
+    ctx.strokeStyle = "rgba(0,0,0,.8)";
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    ctx.moveTo(0,-12); ctx.lineTo(9,10); ctx.lineTo(0,4); ctx.lineTo(-9,10);
+    ctx.closePath(); ctx.fill(); ctx.stroke();
+    return c.toDataURL();
+  }
+  const SAT3D_ARROW_ICONS = {};
+  PHASE_COLOR.forEach((hex,i)=>{ SAT3D_ARROW_ICONS[i] = makeArrowIcon(hex); });
+  SAT3D_ARROW_ICONS.cruiseDark = makeArrowIcon("#062659");
+
+  // heading (compass degrees) -> a 3D "aligned axis" Cesium can use to keep
+  // the billboard pointing the right way regardless of camera angle/orbit.
+  function headingAlignedAxis(lon, lat, alt, headingDeg){
+    const rad = headingDeg*Math.PI/180;
+    const aheadLon = lon + (Math.sin(rad)*10)/mPerLon;
+    const aheadLat = lat + (Math.cos(rad)*10)/mPerLat;
+    const p0 = Cesium.Cartesian3.fromDegrees(lon, lat, alt);
+    const p1 = Cesium.Cartesian3.fromDegrees(aheadLon, aheadLat, alt);
+    const axis = Cesium.Cartesian3.subtract(p1, p0, new Cesium.Cartesian3());
+    return Cesium.Cartesian3.normalize(axis, axis);
+  }
+
+  function sat3dWindEndpoint(originLon, originLat, originAlt, u, v, spd){
+    // u/v are m/s velocity components (magnitude ~spd), not a unit vector —
+    // must normalize by spd or the arrow stretches far off screen.
+    const len = Math.max(8, Math.min(120, spd * SAT3D_WIND_ARROW_SCALE));
+    const ux = u/spd, vy = v/spd;
+    const dLon = (ux*len)/mPerLon, dLat = (vy*len)/mPerLat;
+    return Cesium.Cartesian3.fromDegrees(originLon+dLon, originLat+dLat, originAlt);
+  }
+
+  function updateSat3DCamera(){
+    if (!cesiumViewer) return;
+    cesiumViewer.camera.lookAt(sat3dOrbitTarget, new Cesium.HeadingPitchRange(sat3dHeading, sat3dPitch, sat3dRange));
+  }
+
+  function initSat3D(){
+    if (sat3dReady) return;
+    sat3dReady = true;
+
+    const esriImagery = new Cesium.UrlTemplateImageryProvider({
+      url: "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
+      credit: "Tiles © Esri — Source: Esri, Maxar, Earthstar Geographics, and the GIS User Community",
+      // capped below this rural site's real available imagery resolution —
+      // past this it just upscales the same tile (looks pixelated), same fix as 2D
+      maximumLevel: 17
+    });
+    esriImagery.errorEvent.addEventListener(e=>console.error("SAT3D imagery error:", e.message||e));
+
+    cesiumViewer = new Cesium.Viewer("satCesiumDiv", {
+      // Newer Cesium versions need "baseLayer" (an ImageryLayer instance),
+      // not the older "imageryProvider" shortcut — that silently added zero layers.
+      baseLayer: new Cesium.ImageryLayer(esriImagery),
+      terrainProvider: new Cesium.EllipsoidTerrainProvider(),
+      baseLayerPicker: false, geocoder: false, homeButton: false, sceneModePicker: false,
+      navigationHelpButton: false, animation: false, timeline: false,
+      fullscreenButton: false, infoBox: false, selectionIndicator: false
+    });
+
+    const flat = new Array(N*3);
+    for (let i=0;i<N;i++){ flat[i*3]=FT.lon[i]; flat[i*3+1]=FT.lat[i]; flat[i*3+2]=FT.alt[i]; }
+    // No ground-elevation offset: flat EllipsoidTerrainProvider paints
+    // imagery directly at height=0, so raw AGL altitude can be used as-is.
+    sat3dPathPositions = Cesium.Cartesian3.fromDegreesArrayHeights(flat);
+
+    cesiumViewer.entities.add({
+      // Dark navy (not the default cruise teal) — same contrast treatment
+      // as the 2D satellite view, since this scene is always over imagery.
+      polyline: { positions: sat3dPathPositions, width: 2,
+        material: new Cesium.ColorMaterialProperty(Cesium.Color.fromCssColorString("#062659").withAlpha(0.35)),
+        clampToGround: false }
+    });
+
+    // Fading comet trail (last SAT3D_TRAIL_LEN samples, bright near the
+    // aircraft and dimming with age) instead of one flat-colored line for
+    // the whole traveled-so-far path — the flat version made it impossible
+    // to tell "just passed here" from "passed here 10 minutes ago", unlike
+    // the 2D/hand-rolled 3D views which already have this fading effect.
+    // Pre-built as a fixed pool of short segments, reused every frame
+    // (cheaper than creating/destroying entities each tick).
+    sat3dTrailPool = [];
+    for (let i=0;i<SAT3D_TRAIL_LEN;i++){
+      // PolylineGlowMaterialProperty (not plain color) — the glow belongs
+      // on the trail itself, not as a separate blob sitting on the aircraft
+      // (that was tried and looked like an oversized, out-of-place blur).
+      sat3dTrailPool.push(cesiumViewer.entities.add({
+        polyline: { positions: [sat3dPathPositions[0], sat3dPathPositions[0]], width: 6,
+          material: new Cesium.PolylineGlowMaterialProperty({
+            glowPower: 0.25, color: Cesium.Color.fromCssColorString(PHASE_COLOR[0]).withAlpha(0.2) }),
+          clampToGround: false },
+        show: false
+      }));
+    }
+
+    // Billboard (not a plain point) so heading is visible — alignedAxis is
+    // updated every frame in updateSat3D() to point the arrow the way the
+    // aircraft is actually traveling.
+    sat3dAircraftEntity = cesiumViewer.entities.add({
+      position: sat3dPathPositions[0],
+      billboard: { image: SAT3D_ARROW_ICONS[0], width: 38, height: 38,
+        alignedAxis: Cesium.Cartesian3.UNIT_Z, disableDepthTestDistance: Number.POSITIVE_INFINITY }
+    });
+
+    sat3dRaavenWindEntity = cesiumViewer.entities.add({
+      polyline: { positions: [sat3dPathPositions[0], sat3dPathPositions[0]], width: 6,
+        material: new Cesium.PolylineArrowMaterialProperty(Cesium.Color.WHITE), clampToGround: false },
+      show: false
+    });
+    sat3dTowerPos32 = Cesium.Cartesian3.fromDegrees(TOWER.lon, TOWER.lat, 32);
+    sat3dTowerWindEntity = cesiumViewer.entities.add({
+      polyline: { positions: [sat3dTowerPos32, sat3dTowerPos32], width: 6,
+        material: new Cesium.PolylineArrowMaterialProperty(Cesium.Color.WHITE), clampToGround: false },
+      show: false
+    });
+
+    const towerBase = Cesium.Cartesian3.fromDegrees(TOWER.lon, TOWER.lat, 0);
+    cesiumViewer.entities.add({
+      polyline: { positions: [towerBase, sat3dTowerPos32], width: 5,
+        material: new Cesium.ColorMaterialProperty(Cesium.Color.fromCssColorString("#d1483a")), clampToGround: false }
+    });
+    TOWER_MAST_M.forEach(h=>{
+      cesiumViewer.entities.add({
+        position: Cesium.Cartesian3.fromDegrees(TOWER.lon, TOWER.lat, h),
+        point: { pixelSize: 8, color: Cesium.Color.fromCssColorString("#d1483a"),
+          outlineColor: Cesium.Color.BLACK, outlineWidth: 1 },
+        label: { text: h+"m", font: "12px Bahnschrift,sans-serif", pixelOffset: new Cesium.Cartesian2(12,0),
+          fillColor: Cesium.Color.WHITE, showBackground: true,
+          backgroundColor: Cesium.Color.fromCssColorString("#0a121c").withAlpha(0.7) }
+      });
+    });
+    cesiumViewer.entities.add({
+      position: sat3dTowerPos32,
+      label: { text: "TOWER", font: "bold 14px Bahnschrift,sans-serif", pixelOffset: new Cesium.Cartesian2(0,-20),
+        fillColor: Cesium.Color.WHITE, showBackground: true,
+        backgroundColor: Cesium.Color.fromCssColorString("#0a121c").withAlpha(0.7) }
+    });
+
+    // custom drag-to-orbit camera, matching the existing hand-rolled 3D
+    // view's UX (drag to orbit, scroll to zoom) instead of Cesium's own
+    // default navigation, which feels different/less predictable. Target
+    // starts on the tower, then updateSat3D() re-centers it on the aircraft
+    // every frame once playback starts (see updateSat3DCamera below).
+    sat3dOrbitTarget = Cesium.Cartesian3.fromDegrees(TOWER.lon, TOWER.lat, 20);
+    const ctrl3 = cesiumViewer.scene.screenSpaceCameraController;
+    ctrl3.enableRotate=false; ctrl3.enableTranslate=false; ctrl3.enableTilt=false;
+    ctrl3.enableZoom=false; ctrl3.enableLook=false;
+    updateSat3DCamera();
+
+    const sat3dCanvas = cesiumViewer.scene.canvas;
+    let dragging3s=false, dragLastX3s=0, dragLastY3s=0;
+    sat3dCanvas.addEventListener("pointerdown", e=>{ dragging3s=true; dragLastX3s=e.clientX; dragLastY3s=e.clientY; });
+    window.addEventListener("pointerup", ()=>{ dragging3s=false; });
+    sat3dCanvas.addEventListener("pointermove", e=>{
+      if(!dragging3s) return;
+      sat3dHeading += (e.clientX-dragLastX3s)*0.006;
+      sat3dPitch = Cesium.Math.clamp(sat3dPitch-(e.clientY-dragLastY3s)*0.006,
+        Cesium.Math.toRadians(-85), Cesium.Math.toRadians(-5));
+      dragLastX3s=e.clientX; dragLastY3s=e.clientY;
+      updateSat3DCamera();
+    });
+    sat3dCanvas.addEventListener("wheel", e=>{
+      e.preventDefault();
+      // 180m minimum keeps the camera from zooming in past this imagery's
+      // real resolution (the 80m-clamp version visibly pixelated)
+      sat3dRange = Cesium.Math.clamp(sat3dRange*(e.deltaY>0?1.1:0.9), 180, 4000);
+      updateSat3DCamera();
+    }, {passive:false});
+  }
+
+  function updateSat3D(idx0, frac){
+    if (!cesiumViewer) return;
+    const i1 = Math.min(N-1, idx0+1);
+    const lon = FT.lon[idx0] + (FT.lon[i1]-FT.lon[idx0])*frac;
+    const lat = FT.lat[idx0] + (FT.lat[i1]-FT.lat[idx0])*frac;
+    const alt = FT.alt[idx0] + (FT.alt[i1]-FT.alt[idx0])*frac;
+    const aircraftPos = Cesium.Cartesian3.fromDegrees(lon, lat, alt);
+
+    // Dark navy for cruise (not the default teal) — same contrast fix as
+    // the 2D satellite view; ascent/descent colors are left unchanged.
+    const isCruise = PHASE[idx0]===3;
+    const headIconKey = isCruise ? "cruiseDark" : PHASE[idx0];
+    sat3dAircraftEntity.position = aircraftPos;
+    sat3dAircraftEntity.billboard.alignedAxis = headingAlignedAxis(lon, lat, alt, HEAD[idx0]);
+    // Only swap the billboard image when the phase actually changes (not
+    // every single frame) — reassigning a data-URI image 60x/sec is
+    // unnecessary churn.
+    if (headIconKey !== sat3dLastIconKey){
+      sat3dAircraftEntity.billboard.image = SAT3D_ARROW_ICONS[headIconKey];
+      sat3dLastIconKey = headIconKey;
+    }
+
+    // fading comet trail (recent samples bright, older samples dim) — same
+    // formula as the 2D/hand-rolled 3D views (trailLen=70, alpha=0.15+0.65*a,
+    // width=2.5+3.5*a), rebuilt from the fixed entity pool each frame.
+    const trailFirst = idx0 - SAT3D_TRAIL_LEN;
+    for (let p=0; p<SAT3D_TRAIL_LEN; p++){
+      const k = trailFirst + 1 + p;
+      const seg = sat3dTrailPool[p];
+      if (k < 1 || k > idx0){ seg.show = false; continue; }
+      const a = Math.max(0, (k-trailFirst)/SAT3D_TRAIL_LEN);
+      const segColorHex = (PHASE[k]===3) ? "#062659" : PHASE_COLOR[PHASE[k]];
+      // higher floor/width than the 2D formula — thin, near-transparent
+      // segments read as "no color change at all" against busy satellite
+      // imagery, which was the actual complaint (not that the color logic
+      // was wrong, but that it was too subtle to notice).
+      seg.show = true;
+      seg.polyline.positions = [sat3dPathPositions[k-1], sat3dPathPositions[k]];
+      seg.polyline.material = new Cesium.PolylineGlowMaterialProperty({
+        glowPower: 0.15+0.15*a,
+        color: Cesium.Color.fromCssColorString(segColorHex).withAlpha(0.4+0.6*a)
+      });
+      seg.polyline.width = 9+12*a;
+    }
+
+    // Same Wind Vectors/Wind Barbs checkboxes that already gate the 2D/3D
+    // hand-rolled views — previously these arrows showed unconditionally in
+    // the satellite view regardless of the checkboxes, which was the bug.
+    // 3D uses one simplified arrow style for both checkboxes (a true
+    // meteorological barb symbol in 3D would be a much bigger lift).
+    const windOn = showWindVec || showWindBarb;
+    if (windOn && hasWind && WGOOD[idx0]){
+      const color = windColorCesium(WSPD[idx0]);
+      const end = sat3dWindEndpoint(lon, lat, alt, WU[idx0], WV[idx0], WSPD[idx0]);
+      sat3dRaavenWindEntity.polyline.positions = [aircraftPos, end];
+      sat3dRaavenWindEntity.polyline.material = new Cesium.PolylineArrowMaterialProperty(color);
+      sat3dRaavenWindEntity.show = true;
+    } else {
+      sat3dRaavenWindEntity.show = false;
+    }
+
+    if (windOn && hasMore && FT_MORE.wspd_tower && !isNaN(FT_MORE.wspd_tower[idx0])){
+      const tSpd = FT_MORE.wspd_tower[idx0], tDir = FT_MORE.wdir_tower[idx0];
+      const tu = -tSpd*Math.sin(tDir*Math.PI/180), tv = -tSpd*Math.cos(tDir*Math.PI/180);
+      const color = windColorCesium(tSpd);
+      const end = sat3dWindEndpoint(TOWER.lon, TOWER.lat, 32, tu, tv, tSpd);
+      sat3dTowerWindEntity.polyline.positions = [sat3dTowerPos32, end];
+      sat3dTowerWindEntity.polyline.material = new Cesium.PolylineArrowMaterialProperty(color);
+      sat3dTowerWindEntity.show = true;
+    } else {
+      sat3dTowerWindEntity.show = false;
+    }
+
+  }
+
   function activateView(mode){
     viewMode = mode;
     document.querySelectorAll(".view-tab").forEach(b=>{
@@ -1227,11 +1542,8 @@ const FT_MORE = {
       b.classList.toggle("active", active); b.setAttribute("aria-selected", active?"true":"false");
     });
     mapCanvas.classList.toggle("view-hidden", viewMode!=="2d");
-    map3dCanvas.classList.toggle("view-hidden", viewMode!=="3d");
-    el("legend2d").style.display = viewMode==="2d" ? "flex":"none";
-    el("legend3d").style.display = viewMode==="3d" ? "flex":"none";
     if(viewMode==="3d" && !map3dW) resize3D();
-    updateRealMapState();
+    updateViewVisibility();
     render();
   }
   document.querySelectorAll(".view-tab").forEach(btn=>{
@@ -1269,16 +1581,13 @@ const FT_MORE = {
     helpBody.classList.toggle("collapsed", helpCollapsed);
   });
 
-  // "REAL MAP" toggle: swaps the hand-drawn farmland texture for a real
-  // OpenStreetMap basemap (2D view only) — see updateRealMapState() above.
+  // "REAL MAP" toggle: works in both tabs — swaps the hand-drawn farmland
+  // texture for real Esri satellite imagery in 2D, or the hand-rolled orbit
+  // scene for the Cesium satellite scene in 3D. See updateViewVisibility() above.
   const toggleRealMapBtn = el("toggleRealMapBtn");
   toggleRealMapBtn.addEventListener("click", ()=>{
     realMapMode = !realMapMode;
-    toggleRealMapBtn.classList.toggle("active", realMapMode);
-    // REAL MAP only applies to the 2D view — switch to it automatically
-    // instead of silently doing nothing if the user is on 3D VIEW.
-    if (realMapMode && viewMode !== "2d") activateView("2d");
-    else updateRealMapState();
+    updateViewVisibility();
   });
 
   // wind overlay checkboxes: independent toggles drawn on top of whichever base view is active
@@ -1361,8 +1670,10 @@ const FT_MORE = {
     const f = simTime/2;
     const idx0 = Math.max(0,Math.min(N-1,Math.floor(f)));
     const frac = f-idx0;
-    if(viewMode==="3d") drawMap3D(idx0, idx0<N-1?frac:0);
-    else drawMap(idx0, idx0<N-1?frac:0);
+    if(viewMode==="3d"){
+      if(realMapMode) updateSat3D(idx0, idx0<N-1?frac:0);
+      else drawMap3D(idx0, idx0<N-1?frac:0);
+    } else drawMap(idx0, idx0<N-1?frac:0);
     drawStrip(simTime);
     for (const key in COMPARISON){ const c = COMPARISON[key]; if (c.st.show) c.draw(simTime, idx0); }
     updateTelemetry(simTime, idx0, idx0<N-1?frac:0);
