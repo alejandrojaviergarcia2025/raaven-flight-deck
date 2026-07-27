@@ -78,6 +78,11 @@
   .wind-toggles-body input[type=checkbox]{transform:scale(.85)}
   .wind-toggles-body.collapsed{display:none}
   .wind-toggles-row{display:flex;gap:.4rem}
+  .wind-spacing-wrap{display:none;flex-direction:column;gap:.35rem;padding-bottom:.85rem;
+    margin-bottom:.2rem;border-bottom:1px solid var(--border)}
+  .wind-spacing-label{font-size:.8rem;color:var(--muted);display:flex;justify-content:space-between;
+    font-family:var(--font-label);letter-spacing:.03em}
+  .wind-spacing-wrap input[type=range]{width:100%;accent-color:var(--amber);cursor:pointer}
   .help-body{font-family:var(--font-body);font-size:.82rem;line-height:1.55;color:var(--ink);max-width:280px}
   .help-body p{margin:0 0 .65rem}
   .help-body p:last-child{margin-bottom:0}
@@ -171,6 +176,10 @@
         <p><b>Green rings:</b> distance from tower, in meters. <b>Red diamond:</b> the tower.</p>
       </div>
       <div class="wind-toggles-body" id="windTogglesBody">
+        <div class="wind-spacing-wrap" id="windSpacingWrap">
+          <label class="wind-spacing-label" for="windSpacingSlider">Symbol spacing<b id="windSpacingVal">30s</b></label>
+          <input type="range" id="windSpacingSlider" min="1" max="300" value="30" step="1" aria-label="Wind symbol spacing along track, in seconds">
+        </div>
         <label><input type="checkbox" id="chkWindVec"> Wind Vectors</label>
         <label id="barbToggleWrap"><input type="checkbox" id="chkWindBarb"> Wind Barbs</label>
         <label><input type="checkbox" id="chkTemp"> Temperature</label>
@@ -729,7 +738,15 @@ const FT_MORE = {
     }
   }
 
-  const WIND_STEP = 25; // ~50s spacing between symbols along the track
+  // WIND_STEP is an index count, but the slider is in seconds — convert using the
+  // track's real average sample interval (FT.t isn't guaranteed exactly 2s/point,
+  // just downsampled close to it) so the spacing stays accurate however FT was built.
+  function computeWindStep(sec){
+    const avgDt = (FT.t[N-1]-FT.t[0])/Math.max(1,(N-1));
+    return Math.max(1, Math.round(sec/avgDt));
+  }
+  let windSpacingSec = 30;
+  let WIND_STEP = computeWindStep(windSpacingSec);
   const WIND_ARROW_PX = 40;
 
   // interpolated live wind at the exact playhead position (falls back to whichever
@@ -1593,16 +1610,35 @@ const FT_MORE = {
   // wind overlay checkboxes: independent toggles drawn on top of whichever base view is active
   let showWindVec=false, showWindBarb=false;
   const chkWindVec=el("chkWindVec"), chkWindBarb=el("chkWindBarb");
+  const windSpacingWrap=el("windSpacingWrap"), windSpacingSlider=el("windSpacingSlider"), windSpacingVal=el("windSpacingVal");
+  function fmtSpacing(sec){
+    if (sec<60) return sec+"s";
+    const m=Math.floor(sec/60), s=sec%60;
+    return s===0 ? m+"m" : m+"m "+s+"s";
+  }
+  // only relevant once a wind overlay is actually on screen — auto-show/hide with
+  // the checkboxes instead of requiring a separate manual expand step
+  function updateWindSpacingVisibility(){
+    windSpacingWrap.style.display = (showWindVec || showWindBarb) ? "flex" : "none";
+  }
+  windSpacingSlider.addEventListener("input", ()=>{
+    windSpacingSec = parseInt(windSpacingSlider.value, 10);
+    windSpacingVal.textContent = fmtSpacing(windSpacingSec);
+    WIND_STEP = computeWindStep(windSpacingSec);
+    render();
+  });
   chkWindVec.addEventListener("change", ()=>{
     showWindVec = chkWindVec.checked;
     el("windScale2d").style.display = (showWindVec || showWindBarb) ? "flex":"none";
     el("windScale3d").style.display = (showWindVec || showWindBarb) ? "flex":"none";
+    updateWindSpacingVisibility();
     render();
   });
   chkWindBarb.addEventListener("change", ()=>{
     showWindBarb = chkWindBarb.checked;
     el("windScale2d").style.display = (showWindVec || showWindBarb) ? "flex":"none";
     el("windScale3d").style.display = (showWindVec || showWindBarb) ? "flex":"none";
+    updateWindSpacingVisibility();
     render();
   });
 
